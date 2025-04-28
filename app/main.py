@@ -43,21 +43,21 @@ async def register(reg: RegisterRequest,db: AsyncSession = Depends(get_db)):
     """
     # 0) Сначала спросим у внешнего API, свободен ли логин:
     try:
-        unique_resp = await login_unique(reg.email)
+        login_resp = await login_unique(reg.email)
     except httpx.HTTPError as e:
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail=f"Failed to check login uniqueness: {e}"
         )
     # 1) Разбираем ответ:
-    #    { "result":"success", "description":"Login is unique", … }
-    if unique_resp.get("result") != "success":
+    #  { "result":"success", "description":"Login is unique", … }
+    if login_resp.get("result") != "success":
         # будь то result="error" или что-то ещё
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=unique_resp.get("description", "Login not available")
+            detail=login_resp.get("description", "Login not available")
         )
-    # 2) Дубль в своей БД (телефон и пр.)
+    # 2) Дубль email в своей БД 
     if await db.execute(select(User).where(User.email == reg.email)).scalar_one_or_none():
         raise HTTPException(400, "Email already exist")
 
