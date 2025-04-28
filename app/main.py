@@ -7,12 +7,14 @@ from passlib.context import CryptContext
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy import select
 import uvicorn
+import httpx
+
 
 # my dirs
 from .db import get_db, engine
 from .models import User, Base
 from .schemas import RegisterRequest, LoginRequest, ResetRequest
-from .external_client import register, login_user, reset_password
+from .external_client import register_user, login_unique
 
 pwd_context = CryptContext(schemes=['bcrypt'], deprecated='auto')
 
@@ -39,13 +41,26 @@ async def register(reg: RegisterRequest,db: AsyncSession = Depends(get_db)):
     param: reg: RegisterRequest
     param: db: AsyncSession
     """
-    # check to dublicate
-    existing = await db.execute(select(User).where(User.email == reg.email))
-    if existing.scalar_one_or_none():
+    # 0) Сначала спросим у внешнего API, свободен ли логин:
+    try:
+        unique_resp = await login_unique(reg.email)
+    except httpx.HTTPError as e:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Failed to check login uniqueness: {e}"
+        )
+    # 1) Разбираем ответ:
+    #    { "result":"success", "description":"Login is unique", … }
+    if unique_resp.get("result") != "success":
+        # будь то result="error" или что-то ещё
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="email already used"
+            detail=unique_resp.get("description", "Login not available")
         )
+    # 2) Дубль в своей БД (телефон и пр.)
+    if await db.execute(select(User).where(User.email == reg.email)).scalar_one_or_none():
+        raise HTTPException(400, "Email already exist")
+
     # check password
     if reg.password != reg.password_repeat:
         raise HTTPException(
@@ -73,12 +88,10 @@ async def register(reg: RegisterRequest,db: AsyncSession = Depends(get_db)):
         raise HTTPException(400, "Uniqueness violation")
     
 
-
-
     # request to external api
     external_reg = reg.dict(exclude={'phone'})
     try:
-        #result = await register(reg.dict(exclude={"phone"}))
+        #external_result = await register_user(payload)
         pass
     except Exception as e:
         raise HTTPException(
@@ -87,14 +100,14 @@ async def register(reg: RegisterRequest,db: AsyncSession = Depends(get_db)):
         )
     return external_reg
 
-app = FastAPI(
-    title='Utip Auth Form',
-    lifespan=lifespan
-)
-app.include_router(router)
-
+#-----------------------------------#
 if __name__ == "__main__":
-    import uvicorn
+    app = FastAPI(
+            title='Utip Auth Form',
+            lifespan=lifespan
+        )
+    app.include_router(router)
+
     uvicorn.run(
         "app.main:app",
         host="127.0.0.1",
