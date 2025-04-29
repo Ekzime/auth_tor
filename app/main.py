@@ -1,6 +1,6 @@
 # other libs
 from fastapi import FastAPI, Depends, HTTPException, status, APIRouter
-from fastapi.responses import RedirectResponse
+from fastapi.responses import RedirectResponse, JSONResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 from contextlib import asynccontextmanager
 from passlib.context import CryptContext
@@ -14,7 +14,7 @@ import httpx
 from .db import get_db, engine
 from .models import User, Base
 from .schemas import RegisterRequest, LoginRequest, ResetRequest
-from .external_client import register_user, email_unique
+from .external_client import register_user, email_unique, authentication
 
 #pwd_context = CryptContext(schemes=['bcrypt'], deprecated='auto')
 
@@ -47,64 +47,86 @@ async def register(reg: RegisterRequest,db: AsyncSession = Depends(get_db)):
     param: reg: RegisterRequest
     param: db: AsyncSession
     """
-    # 0) Проверяем у внешнего АПИ, свободен ли email
+    # 1) проверяем email во внешнем API
     try:
-        login_resp = await email_unique(reg.email)
-    except httpx.HTTPStatusError as e:
-        # любые 5xx/3xx, которых мы не ожидаем, трактуем как проблему связи
+        uniq = await email_unique(reg.email)
+    except httpx.HTTPError as e:
+        raise HTTPException(502, f"Error checking uniqueness: {e}")
+    if uniq.get("result") != "success":
+        raise HTTPException(400, detail=uniq.get("description", "Email not unique"))
+
+    # 2) регистрируем во внешнем API
+    payload = reg.dict(exclude={"phone"})
+    try:
+        ext = await register_user(payload)
+    except httpx.HTTPError as e:
+        raise HTTPException(502, f"Error registering externally: {e}")
+
+    # 3) если внешний сервис вернул failed — отдаём клиенту его же ошибку
+    if ext.get("result") != "success":
         raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=f"Error checking uniqueness: {e}"
-        )
-    # 0.1) Если внешний сервис нам вернул не success — возвращаем его описание
-    if login_resp.get("result") != "success":
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=login_resp.get("description", "Email not unique")
+            400,
+            detail={
+                "description":  ext.get("description"),
+                "errors":       ext.get("errors"),
+                "error_number": ext.get("error_number"),
+            }
         )
 
-    # 1) Дубль email в своей БД 
-    if await db.execute(select(User).where(User.email == reg.email)).scalar_one_or_none():
-        raise HTTPException(400, "Email already exist")
-
-    # 2) check password
-    if reg.password != reg.password_repeat:
-        raise HTTPException(
-            status_code=400,
-            detail="The passwords do not match"
-        )
-    
-    # 3) save to db
+    # 4) сохраняем в своей БД
     user = User(
         email=reg.email,
         hashed_password=reg.password,
-        first_name= reg.first_name,
+        first_name=reg.first_name,
         last_name=reg.last_name,
         country=reg.country,
-        phone=reg.phone
+        phone=reg.phone,
     )
     db.add(user)
     try:
         await db.commit()
         await db.refresh(user)
-    except Exception as e:
+    except IntegrityError as e:
         await db.rollback()
-        if "phone" in str(e.orig).lower():
+        msg = str(e.orig).lower()
+        if "phone" in msg:
             raise HTTPException(400, "Phone number already exist")
         raise HTTPException(400, "Uniqueness violation")
-    
 
-    # 4) request to external api
-    external_reg = reg.dict(exclude={'phone'})
+    # 5) всё ок, возвращаем внешний ответ + свой user_id
+    redirect_url = "/"
+    return {
+        "external": ext,
+        "redirect_url": redirect_url
+    }
+
+
+@router.post("/login", status_code=status.HTTP_200_OK)
+async def login_endpoint(req: LoginRequest):
+    """
+    POST login
+    Авторизует
+    """
     try:
-        #external_result = await register_user(payload)
-        pass
-    except Exception as e:
+        result = await authentication({
+            "email":    req.email,
+            "password": req.password
+        })
+    except httpx.HTTPStatusError as e:
+        raise HTTPException(502, f"Error logging in: {e}")
+    except httpx.RequestError as e:
+        raise HTTPException(502, f"Network error: {e}")
+
+    if result.get("result") != "success":
         raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=f'Error request to external api:{e}'
+            status_code=400,
+            detail={
+                "description":  result.get("description"),
+                "errors":       result.get("errors", {}),
+                "error_number": result.get("error_number")
+            }
         )
-    return external_reg
+    return result
 
 #-----------------------------------#
 app = FastAPI(
