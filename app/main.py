@@ -1,39 +1,35 @@
 # other libs
 from fastapi import FastAPI, Depends, HTTPException, status, APIRouter
-from fastapi.responses import RedirectResponse, JSONResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 from contextlib import asynccontextmanager
-from passlib.context import CryptContext
 from sqlalchemy.exc import IntegrityError
+from dotenv import load_dotenv
 from sqlalchemy import select
 import uvicorn
 import httpx
+import os
 
-
-# my dirs
+# my module
 from .db import get_db, engine
 from .models import User, Base
 from .schemas import RegisterRequest, LoginRequest, ResetRequest
-from .external_client import register_user, email_unique, authentication
+from .external_client import register_user, email_unique, authentication, generate_recovery_password_letter
 
-#pwd_context = CryptContext(schemes=['bcrypt'], deprecated='auto')
+load_dotenv()
+REDIRECT_URL_TO_LOGIN_FORM = os.getenv("REDIRECT_URL_TO_LOGIN_FORM")
+BASE_REDIRECT_URL = os.getenv('BASE_REDIRECT_URL')
 
-# prefix & route
 router = APIRouter(prefix="/api/v1", tags=['v1'])
 
 # table inits
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # код, который раньше был в on_event('startup')
+    """
+    Инициализация таблиц
+    """
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
     yield
-
-# @router.get("/test-email")
-# async def test():
-#     email = "testexodus@gmail.com"
-#     result = await email_unique(email=email)
-#     return result
 
 @router.post("/register", status_code=status.HTTP_201_CREATED)
 async def register(reg: RegisterRequest,db: AsyncSession = Depends(get_db)):
@@ -62,17 +58,6 @@ async def register(reg: RegisterRequest,db: AsyncSession = Depends(get_db)):
     except httpx.HTTPError as e:
         raise HTTPException(502, f"Error registering externally: {e}")
 
-    # 3) если внешний сервис вернул failed — отдаём клиенту его же ошибку
-    if ext.get("result") != "success":
-        raise HTTPException(
-            400,
-            detail={
-                "description":  ext.get("description"),
-                "errors":       ext.get("errors"),
-                "error_number": ext.get("error_number"),
-            }
-        )
-
     # 4) сохраняем в своей БД
     user = User(
         email=reg.email,
@@ -94,10 +79,12 @@ async def register(reg: RegisterRequest,db: AsyncSession = Depends(get_db)):
         raise HTTPException(400, "Uniqueness violation")
 
     # 5) всё ок, возвращаем внешний ответ + свой user_id
-    redirect_url = "/"
+    # редирект ссылка на форму с логином.
     return {
-        "external": ext,
-        "redirect_url": redirect_url
+        "status": "success",
+        "data": {
+            "redirect_url": REDIRECT_URL_TO_LOGIN_FORM
+        }
     }
 
 
@@ -105,12 +92,13 @@ async def register(reg: RegisterRequest,db: AsyncSession = Depends(get_db)):
 async def login_endpoint(req: LoginRequest):
     """
     POST login
-    Авторизует
+    Авторизует и возвращает ссылку с автологином на основной сайт.
     """
+    # логиним пользователя у партнеров
     try:
         result = await authentication({
             "email":    req.email,
-            "password": req.password
+            "password": req.password,
         })
     except httpx.HTTPStatusError as e:
         raise HTTPException(502, f"Error logging in: {e}")
@@ -126,7 +114,51 @@ async def login_endpoint(req: LoginRequest):
                 "error_number": result.get("error_number")
             }
         )
-    return result
+    # формируем ссылку для редиректа с автологином.
+    auth_token = result['values']['auth_token']
+    redirect_url = f'{BASE_REDIRECT_URL}/{auth_token}/{req.email}/{req.language}'
+    return {
+        "status": "success",
+        "data": {
+            "redirect_url": redirect_url
+        }
+    }
+
+
+@router.post("/reset-password", status_code=status.HTTP_200_OK)
+async def reset_pass(req: ResetRequest):
+    """
+    POST /ForgotYourPassword
+
+    Генерирует новый пароль для пользователя по email.
+    """
+    # 1) зовём внешний метод, передавая req.user_email
+    try:
+        result = await generate_recovery_password_letter(req.user_email)
+    except httpx.HTTPStatusError as e:
+        raise HTTPException(502, f"External service error: {e}")
+    except httpx.RequestError as e:
+        raise HTTPException(502, f"Network error: {e}")
+
+    # 2) проверяем результат
+    if result.get("result") != "success":
+        raise HTTPException(
+            400,
+            detail={
+                "description":  result.get("description"),
+                "errors":       result.get("errors", []),
+                "error_number": result.get("error_number"),
+            }
+        )
+
+    # 3) возвращаем унифицированный ответ
+    return {
+        "status": "success",
+        "data": {
+            "message": result
+        }
+    }
+
 
 #-----------------------------------#
 app = FastAPI(

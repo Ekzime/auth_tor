@@ -68,3 +68,21 @@ async def authentication(data: Dict[str, str]) -> Dict[str, Any]:
         resp = await client.post(url, data=payload, timeout=10)
         resp.raise_for_status()
         return resp.json()
+
+async def generate_recovery_password_letter(email:str):
+    """
+    POST /GenerateRecoveryPasswordLetter
+
+    Отправляет запрос на сброс пароля на сервер ютипа.
+    """
+    kr = _make_key()
+    data = {
+        **kr,
+        "user_email": email,
+    }
+    print(data)
+    url = f"{BASE_UTIP_URL}/ForgotYourPassword"
+    async with httpx.AsyncClient(follow_redirects=True) as client:
+        resp = await client.post(url, data=data, timeout=5)
+        resp.raise_for_status()
+        return resp.json()

@@ -1,14 +1,5 @@
-from uuid import UUID
-from datetime import datetime
-from typing import Optional
-
-from pydantic import (
-    BaseModel,
-    EmailStr,
-    Field,
-    constr,
-    ConfigDict,
-)
+from pydantic import BaseModel, EmailStr, constr
+from typing import Literal
 
 class RegisterRequest(BaseModel):
     email: EmailStr
@@ -22,6 +13,7 @@ class RegisterRequest(BaseModel):
 class LoginRequest(BaseModel):
     email: EmailStr
     password: str
+    language: Literal["en", "ru"]
 
 class ResetRequest(BaseModel):
-    email: EmailStr
+    user_email: EmailStr
