@@ -3,25 +3,31 @@ version: "3.8"
 services:
   db:
     image: mysql:8.0
-    container_name: mysql
     restart: always
     environment:
       MYSQL_ROOT_PASSWORD: rootpass123
       MYSQL_ROOT_HOST: '%'
-      MYSQL_DATABASE: form_auth
+      MYSQL_DATABASE: clients
       MYSQL_USER: myapp_user
       MYSQL_PASSWORD: secret123
     ports:
       - "3307:3306"
     volumes:
       - db_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - backend
 
   phpmyadmin:
     image: phpmyadmin/phpmyadmin
-    container_name: phpmyadmin
     restart: always
     depends_on:
-      - db
+      db:
+        condition: service_healthy
     environment:
       PMA_HOST: db
       PMA_PORT: 3306
@@ -29,6 +35,11 @@ services:
       PMA_PASSWORD: secret123
     ports:
       - "8081:80"
+    networks:
+      - backend
 
 volumes:
   db_data:
+
+networks:
+  backend:
