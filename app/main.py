@@ -33,6 +33,10 @@ async def lifespan(app: FastAPI):
         await conn.run_sync(Base.metadata.create_all)
     yield
 
+@router.get('/health',status_code=200)
+async def health():
+    return {'status': 'ok'}
+
 async def _auth_and_redirect(email: str, password: str, language: str) -> str:
     """
     Логинит пользователя на партнёрском API и возвращает готовую ссылку для редиректа.
@@ -200,7 +204,13 @@ app = FastAPI(
             lifespan=lifespan
         )
 app.include_router(router)
-
+app.add_middleware(
+    CORSMiddleware,
+    allow_origin= ['*'],
+    allow_methods=['*'],
+    allow_headers=["*"],                
+    allow_credentials=True, 
+)
 
 if __name__ == "__main__":
     uvicorn.run(
