@@ -5,7 +5,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from contextlib import asynccontextmanager
 from sqlalchemy.exc import IntegrityError
 from dotenv import load_dotenv
-from sqlalchemy import select
+from sqlalchemy import select, or_
 import uvicorn
 import httpx
 import os
@@ -33,6 +33,33 @@ async def lifespan(app: FastAPI):
         await conn.run_sync(Base.metadata.create_all)
     yield
 
+async def _auth_and_redirect(email: str, password: str, language: str) -> str:
+    """
+    Логинит пользователя на партнёрском API и возвращает готовую ссылку для редиректа.
+    Бросает HTTPException, если что-то пошло не так.
+    """
+    try:
+        result = await authentication({
+            "email":    email,
+            "password": password,
+        })
+    except httpx.HTTPStatusError as e:
+        raise HTTPException(502, detail=f"Error logging in: {e}")
+    except httpx.RequestError as e:
+        raise HTTPException(502, detail=f"Network error: {e}")
+
+    if result.get("result") != "success":
+        detail = {
+            "description":  result.get("description"),
+            "errors":       result.get("errors", {}),
+            "error_number": result.get("error_number")
+        }
+        raise HTTPException(status_code=400, detail=detail)
+
+    token = result["values"]["auth_token"]
+    # Собираем URL автологина
+    return f"{BASE_REDIRECT_URL}/{token}/{email}/{language}"
+
 @router.post("/register", status_code=status.HTTP_201_CREATED)
 async def register(reg: RegisterRequest,db: AsyncSession = Depends(get_db)):
     """
@@ -42,6 +69,17 @@ async def register(reg: RegisterRequest,db: AsyncSession = Depends(get_db)):
     В случае успеха, сохраняет в БД, и отправляет данные на внешний АПИ без номера телефона.
     Ожидает ответ от внешнего АПИ, что бы передать на форму с UI.
     """
+    # 0) локальная проверка.
+    existing = await db.scalar(
+        select(User).where(
+            or_(User.email == reg.email, User.phone == reg.phone)
+        )
+    )
+    if existing:
+        if existing.email == reg.email:
+            raise HTTPException(400, detail="Email already exist")
+        else:
+            raise HTTPException(400, detail="Phone number alredy exist")
     # 1) Проверяем, что email свободен во внешнем API
     try:
         uniq = await email_unique(reg.email)
@@ -82,12 +120,21 @@ async def register(reg: RegisterRequest,db: AsyncSession = Depends(get_db)):
             raise HTTPException(400, detail="Email already exists")
         raise HTTPException(400, detail="Uniqueness violation")
 
-    # 4) Возвращаем результат внешнего API + наш user_id
+    # 4)логин и редирект
+    redirect_url = await _auth_and_redirect(
+        email=reg.email,
+        password=reg.password,
+        language="ru",  
+    ) 
+    # 5) Возвращаем результат внешнего API + наш user_id
     return {
         "status":      "success",
-        "user_id":     user.id,
-        "description": ext.get("description"),
-        "values":      ext.get("values", {}),
+        "data":{
+            "user_id":     user.id,
+            "description": ext.get("description"),
+            "values":      ext.get("values", {}),
+            "redirect_url":redirect_url,
+        },
     }
 
 
@@ -99,28 +146,11 @@ async def login_endpoint(req: LoginRequest):
     Авторизует и возвращает ссылку с автологином на основной сайт.
     """
     # логиним пользователя у партнеров
-    try:
-        result = await authentication({
-            "email":    req.email,
-            "password": req.password,
-        })
-    except httpx.HTTPStatusError as e:
-        raise HTTPException(502, f"Error logging in: {e}")
-    except httpx.RequestError as e:
-        raise HTTPException(502, f"Network error: {e}")
-
-    if result.get("result") != "success":
-        raise HTTPException(
-            status_code=400,
-            detail={
-                "description":  result.get("description"),
-                "errors":       result.get("errors", {}),
-                "error_number": result.get("error_number")
-            }
-        )
-    # формируем ссылку для редиректа с автологином.
-    auth_token = result['values']['auth_token']
-    redirect_url = f'{BASE_REDIRECT_URL}/{auth_token}/{req.email}/{req.language}'
+    redirect_url = await _auth_and_redirect(
+        email=req.email,
+        password=req.password,
+        language=req.language,
+    )
     return {
         "status": "success",
         "data": {
