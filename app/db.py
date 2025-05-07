@@ -8,9 +8,9 @@ load_dotenv()
 DATABASE_URL = os.getenv("DATABASE_URL")  
 # пример: mysql+aiomysql://user:pass@localhost:3306/mydb
 
-engine = create_async_engine(DATABASE_URL, echo=True)
+engine = create_async_engine(DATABASE_URL, echo=True, pool_pre_ping=True,)
 AsyncSessionLocal = sessionmaker(
-    bind=engine, class_=AsyncSession, expire_on_commit=False
+    bind=engine, class_=AsyncSession, expire_on_commit=False,
 )
 
 async def get_db():

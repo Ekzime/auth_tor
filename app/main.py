@@ -1,5 +1,6 @@
 # other libs
 from fastapi import FastAPI, Depends, HTTPException, status, APIRouter
+from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.ext.asyncio import AsyncSession
 from contextlib import asynccontextmanager
 from sqlalchemy.exc import IntegrityError
@@ -18,6 +19,7 @@ from .external_client import register_user, email_unique, authentication, genera
 load_dotenv()
 REDIRECT_URL_TO_LOGIN_FORM = os.getenv("REDIRECT_URL_TO_LOGIN_FORM")
 BASE_REDIRECT_URL = os.getenv('BASE_REDIRECT_URL')
+DOMEN_FOR_CORS = os.getenv('DOMEN_FOR_CORS')
 
 router = APIRouter(prefix="/api/v1", tags=['v1'])
 
@@ -34,31 +36,31 @@ async def lifespan(app: FastAPI):
 @router.post("/register", status_code=status.HTTP_201_CREATED)
 async def register(reg: RegisterRequest,db: AsyncSession = Depends(get_db)):
     """
-    POST if succes status HTTP-201-CREATED
+    POST regisgter
 
-    Принимает данные, есди чего-то нет из ожидаемого, возвращает ошибку.
+    Принимает данные, есkи чего-то нет из ожидаемого, возвращает ошибку.
     В случае успеха, сохраняет в БД, и отправляет данные на внешний АПИ без номера телефона.
     Ожидает ответ от внешнего АПИ, что бы передать на форму с UI.
-
-    param: reg: RegisterRequest
-    param: db: AsyncSession
     """
-    # 1) проверяем email во внешнем API
+    # 1) Проверяем, что email свободен во внешнем API
     try:
         uniq = await email_unique(reg.email)
     except httpx.HTTPError as e:
-        raise HTTPException(502, f"Error checking uniqueness: {e}")
+        raise HTTPException(502, detail=f"Error checking uniqueness: {e}")
     if uniq.get("result") != "success":
         raise HTTPException(400, detail=uniq.get("description", "Email not unique"))
 
-    # 2) регистрируем во внешнем API
-    payload = reg.dict(exclude={"phone"})
+    # 2) Регистрируем во внешнем API
     try:
-        ext = await register_user(payload)
+        ext = await register_user(reg.dict())
     except httpx.HTTPError as e:
-        raise HTTPException(502, f"Error registering externally: {e}")
+        raise HTTPException(502, detail=f"Error registering externally: {e}")
 
-    # 4) сохраняем в своей БД
+    if ext.get("result") != "success":
+        # внешний API вернул ошибку регистрации
+        raise HTTPException(400, detail=ext.get("description", "External registration error"))
+
+    # 3) Сохраняем в локальную БД только если внешний API одобрил
     user = User(
         email=reg.email,
         hashed_password=reg.password,
@@ -75,16 +77,17 @@ async def register(reg: RegisterRequest,db: AsyncSession = Depends(get_db)):
         await db.rollback()
         msg = str(e.orig).lower()
         if "phone" in msg:
-            raise HTTPException(400, "Phone number already exist")
-        raise HTTPException(400, "Uniqueness violation")
+            raise HTTPException(400, detail="Phone number already exists")
+        if "email" in msg:
+            raise HTTPException(400, detail="Email already exists")
+        raise HTTPException(400, detail="Uniqueness violation")
 
-    # 5) всё ок, возвращаем внешний ответ + свой user_id
-    # редирект ссылка на форму с логином.
+    # 4) Возвращаем результат внешнего API + наш user_id
     return {
-        "status": "success",
-        "data": {
-            "redirect_url": REDIRECT_URL_TO_LOGIN_FORM
-        }
+        "status":      "success",
+        "user_id":     user.id,
+        "description": ext.get("description"),
+        "values":      ext.get("values", {}),
     }
 
 
@@ -92,6 +95,7 @@ async def register(reg: RegisterRequest,db: AsyncSession = Depends(get_db)):
 async def login_endpoint(req: LoginRequest):
     """
     POST login
+
     Авторизует и возвращает ссылку с автологином на основной сайт.
     """
     # логиним пользователя у партнеров
@@ -166,6 +170,7 @@ app = FastAPI(
             lifespan=lifespan
         )
 app.include_router(router)
+
 
 if __name__ == "__main__":
     uvicorn.run(
